@@ -1,6 +1,6 @@
-#include "D:\src\tl\include\tl\common.h"
-#include "D:\src\tl\include\tl\math.h"
-#include "D:\src\tl\include\tl\thread.h"
+#include "..\dep\tl\include\tl\common.h"
+#include "..\dep\tl\include\tl\math.h"
+#include "..\dep\tl\include\tl\thread.h"
 using namespace TL;
 #define NOMINMAX
 #include <WS2tcpip.h>
@@ -716,7 +716,7 @@ struct Game {
 			}
 		}
 		for (auto& [k, e] : enemies) {
-			if(k == firingPlayerID) {
+			if (k == firingPlayerID) {
 				continue;
 			}
 			if (hit = raycastCircle(a, b, e.position, playerRadius); hit.hit) {
@@ -724,7 +724,7 @@ struct Game {
 				return hit;
 			}
 		}
-		if(firingPlayerID != playerIndex) {
+		if (firingPlayerID != playerIndex) {
 			if (hit = raycastCircle(a, b, playerPosition, playerRadius); hit.hit) {
 				return hit;
 			}
@@ -866,7 +866,7 @@ struct Game {
 									v2i newPos;
 									do {
 										newPos = {abs(randomI32()) % CHUNK_W, abs(randomI32()) % CHUNK_W};
-									} while(tiles[newPos.x][newPos.y].exists);
+									} while (tiles[newPos.x][newPos.y].exists);
 									playerPosition = (v2)newPos;
 								},
 								[](auto) {}},
@@ -1078,7 +1078,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 		SOCKADDR_IN addr;
 		addr.sin_family = AF_INET;
 		addr.sin_port = htons(27015);
-		addr.sin_addr.S_un.S_addr = inet_addr("127.0.0.1");
+		do {
+			puts("Enter server ip address:");
+			std::string ip;
+			std::cin >> ip;
+
+			addr.sin_addr.S_un.S_addr = inet_addr(ip.data());
+		} while (addr.sin_addr.S_un.S_addr == INADDR_NONE);
 
 		network.socket = socket(AF_INET, SOCK_STREAM, 0);
 		if (connect(network.socket, (SOCKADDR*)&addr, sizeof(addr)) != 0) {

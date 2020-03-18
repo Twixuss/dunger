@@ -1,7 +1,7 @@
 #pragma once
-#include "D:\src\tl\include\tl\common.h"
-#include "D:\src\tl\include\tl\math.h"
-#include "D:\src\tl\include\tl\thread.h"
+#include "..\dep\tl\include\tl\common.h"
+#include "..\dep\tl\include\tl\math.h"
+#include "..\dep\tl\include\tl\thread.h"
 #include <variant>
 using namespace TL;
 namespace Network {

@@ -1,5 +1,5 @@
-#include "D:\src\tl\include\tl\common.h"
-#include "D:\src\tl\include\tl\math.h"
+#include "..\dep\tl\include\tl\common.h"
+#include "..\dep\tl\include\tl\math.h"
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif

@@ -64,11 +64,16 @@ int main(int argc, char** argv) {
 	FD_ZERO(&master);
 	FD_SET(ListenSocket, &master);
 
-	auto send = [](SOCKET socket, ServerMessage const& val) {
-		int iSendResult;
-		do {
-			iSendResult = ::send(socket, (char*)&val, sizeof(val), 0);
-		} while (iSendResult <= 0);
+	std::unordered_map<SOCKET, std::vector<ServerMessage>> messages;
+	auto send = [&](SOCKET socket, ServerMessage val) { messages[socket].push_back(std::move(val)); };
+	auto flush = [&]() {
+		for (auto& [s, v] : messages) {
+			int iSendResult;
+			do {
+				iSendResult = ::send(s, (char*)v.data(), v.size() * sizeof(ServerMessage), 0);
+			} while (iSendResult <= 0);
+		}
+		messages.clear();
 	};
 
 	struct Player {
@@ -205,12 +210,17 @@ int main(int argc, char** argv) {
 					FD_CLR(socket, &master);
 					continue;
 				} else {
-					printf("recv failed: %d\n", WSAGetLastError());
+					int err = WSAGetLastError();
 					closesocket(socket);
+					if (err == WSAECONNRESET) {
+						continue;
+					}
+					printf("recv failed: %d\n", err);
 					ASSERT(0);
 				}
 			}
 		}
+		flush();
 	}
 
 	system("pause");

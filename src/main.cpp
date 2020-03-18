@@ -44,7 +44,7 @@ bool isRunning = true;
 bool wasResized = true;
 bool lostFocus = false;
 v2u clientSize{800, 600};
-bool singlePlayer = 0;
+bool multiPlayer;
 
 struct {
 	struct {
@@ -715,18 +715,20 @@ struct Game {
 				}
 			}
 		}
-		for (auto& [k, e] : enemies) {
-			if (k == firingPlayerID) {
-				continue;
+		if (multiPlayer) {
+			for (auto& [k, e] : enemies) {
+				if (k == firingPlayerID) {
+					continue;
+				}
+				if (hit = raycastCircle(a, b, e.position, playerRadius); hit.hit) {
+					network.push(Network::PlayerHit{k});
+					return hit;
+				}
 			}
-			if (hit = raycastCircle(a, b, e.position, playerRadius); hit.hit) {
-				network.push(Network::PlayerHit{k});
-				return hit;
-			}
-		}
-		if (firingPlayerID != playerIndex) {
-			if (hit = raycastCircle(a, b, playerPosition, playerRadius); hit.hit) {
-				return hit;
+			if (firingPlayerID != playerIndex) {
+				if (hit = raycastCircle(a, b, playerPosition, playerRadius); hit.hit) {
+					return hit;
+				}
 			}
 		}
 		return hit;
@@ -838,44 +840,47 @@ struct Game {
 		}
 	}
 	void update(Renderer* renderer) {
-		for (;;) {
-			if (auto opt = network.pop()) {
-				try {
-					std::visit(
-						Visitor{[&](Network::PositionChange pc) { enemies.at(pc.playerIndex).position = pc.position; },
-								[&](Network::PlayerConnected pc) {
-									printf("PlayerConnected: %u\n", pc.playerIndex);
-									enemies[pc.playerIndex];
-								},
-								[&](Network::PlayerDisconnected pc) {
-									printf("PlayerDisconnected: %u\n", pc.playerIndex);
-									enemies.erase(pc.playerIndex);
-								},
-								[&](Network::AssignIndex ai) {
-									printf("AssignIndex: %u\n", ai.newIndex);
-									playerIndex = ai.newIndex;
-								},
-								[&](Network::CreateBullet b) {
-									Bullet nb;
-									nb.position = b.position;
-									nb.direction = b.direction;
-									nb.id = b.id;
-									bullets.push_back(nb);
-								},
-								[&](Network::PlayerHit ph) {
-									v2i newPos;
-									do {
-										newPos = {abs(randomI32()) % CHUNK_W, abs(randomI32()) % CHUNK_W};
-									} while (tiles[newPos.x][newPos.y].exists);
-									playerPosition = (v2)newPos;
-								},
-								[](auto) {}},
-						*opt);
-				} catch (...) {
-					puts("std::visit failed");
+		if (multiPlayer) {
+			for (;;) {
+				if (auto opt = network.pop()) {
+					try {
+						std::visit(Visitor{[&](Network::PositionChange pc) {
+											   enemies.at(pc.playerIndex).position = pc.position;
+										   },
+										   [&](Network::PlayerConnected pc) {
+											   printf("PlayerConnected: %u\n", pc.playerIndex);
+											   enemies[pc.playerIndex];
+										   },
+										   [&](Network::PlayerDisconnected pc) {
+											   printf("PlayerDisconnected: %u\n", pc.playerIndex);
+											   enemies.erase(pc.playerIndex);
+										   },
+										   [&](Network::AssignIndex ai) {
+											   printf("AssignIndex: %u\n", ai.newIndex);
+											   playerIndex = ai.newIndex;
+										   },
+										   [&](Network::CreateBullet b) {
+											   Bullet nb;
+											   nb.position = b.position;
+											   nb.direction = b.direction;
+											   nb.id = b.id;
+											   bullets.push_back(nb);
+										   },
+										   [&](Network::PlayerHit ph) {
+											   v2i newPos;
+											   do {
+												   newPos = {abs(randomI32()) % CHUNK_W, abs(randomI32()) % CHUNK_W};
+											   } while (tiles[newPos.x][newPos.y].exists);
+											   playerPosition = (v2)newPos;
+										   },
+										   [](auto) {}},
+								   *opt);
+					} catch (...) {
+						puts("std::visit failed");
+					}
+				} else {
+					break;
 				}
-			} else {
-				break;
 			}
 		}
 
@@ -980,7 +985,7 @@ struct Game {
 		newHeroPosition += playerVelocity * time.delta;
 
 		playerPosition = newHeroPosition;
-		if (!singlePlayer)
+		if (multiPlayer)
 			network.push(Network::PositionChange{playerIndex, playerPosition});
 
 		cameraPos = lerp(cameraPos, playerPosition, time.delta * (distance(cameraPos, playerPosition) + 5));
@@ -1003,7 +1008,8 @@ struct Game {
 				b.position = playerPosition;
 				b.id = Network::makeBulletID(playerIndex, bulletCounter++);
 				bullets.push_back(b);
-				network.push(Network::CreateBullet{b.id, b.position, b.direction});
+				if (multiPlayer)
+					network.push(Network::CreateBullet{b.id, b.position, b.direction});
 			}
 		}
 
@@ -1046,7 +1052,8 @@ struct Game {
 		renderFrame(renderer, {camMatrix, drawCalls, lights});
 		drawCalls.clear();
 		lights.clear();
-		network.send();
+		if (multiPlayer)
+			network.send();
 	}
 	void resize() { pixelsInMeters = (v2)clientSize / tileSize; }
 };
@@ -1062,12 +1069,18 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 	freopen("CONOUT$", "w", stdout);
 	freopen("CONIN$", "r", stdin);
 
+	puts("Start multiplayer?");
+	std::string mp;
+	std::cin >> mp;
+
+	multiPlayer = mp != "0" && mp != "false";
+
 	DEFER {
-		if (!singlePlayer) {
+		if (multiPlayer) {
 			WSACleanup();
 		}
 	};
-	if (!singlePlayer) {
+	if (multiPlayer) {
 
 		WSADATA wsaData;
 		if (auto err = WSAStartup(MAKEWORD(2, 2), &wsaData); err != 0) {
@@ -1079,10 +1092,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 		addr.sin_family = AF_INET;
 		addr.sin_port = htons(27015);
 		do {
-			puts("Enter server ip address:");
+			puts("Enter server ip address. You can enter 'local' to connect to your local server");
 			std::string ip;
 			std::cin >> ip;
-
+			if (ip == "local")
+				ip = "127.0.0.1";
 			addr.sin_addr.S_un.S_addr = inet_addr(ip.data());
 		} while (addr.sin_addr.S_un.S_addr == INADDR_NONE);
 
@@ -1105,7 +1119,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 				for (;;) {
 					iResult = recv(network.socket, recvbuf, _countof(recvbuf), 0);
 					if (iResult > 0) {
-						network.queue.push(*(Network::ServerMessage*)recvbuf);
+						if (iResult % sizeof(Network::ServerMessage) != 0) {
+							puts("bad messages");
+							continue;
+						}
+						View messages((Network::ServerMessage*)recvbuf, iResult / sizeof(Network::ServerMessage));
+						for (auto& m : messages) {
+							network.queue.push(std::move(m));
+						}
 					} else if (iResult == 0)
 						printf("Connection closed\n");
 					else
@@ -1118,7 +1139,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 			0, 0, 0));
 	}
 	DEFER {
-		if (!singlePlayer) {
+		if (multiPlayer) {
 			int iResult = shutdown(network.socket, SD_SEND);
 			if (iResult == SOCKET_ERROR) {
 				printf("shutdown failed: %d\n", WSAGetLastError());

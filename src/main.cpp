@@ -2,24 +2,22 @@
 #include "..\dep\tl\include\tl\math.h"
 #include "..\dep\tl\include\tl\thread.h"
 using namespace TL;
-#define NOMINMAX
-#include <WS2tcpip.h>
-#include <WinSock2.h>
+#include "shared.h"
 
-#include <Windows.h>
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <dsound.h>
 
 #include <iostream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "network.h"
-
 #include "..\dep\Microsoft DirectX SDK\Include\D3DX11.h"
 #pragma comment(lib, "../dep/Microsoft DirectX SDK/Lib/x64/d3dx11.lib")
 #pragma comment(lib, "Ws2_32.lib")
+#pragma comment(lib, "dsound.lib")
+#pragma comment(lib, "dxguid.lib")
 
 #define time _time_
 
@@ -44,7 +42,6 @@ bool isRunning = true;
 bool wasResized = true;
 bool lostFocus = false;
 v2u clientSize{800, 600};
-bool multiPlayer;
 
 struct {
 	struct {
@@ -55,6 +52,7 @@ struct {
 			i32 wheel;
 		} mouse;
 	} current, previous;
+	std::string chars;
 	void init() {
 		current = {};
 		previous = {};
@@ -71,6 +69,7 @@ struct {
 		previous = current;
 		current.mouse.delta = {};
 		current.mouse.wheel = {};
+		chars.clear();
 	}
 	void reset() {
 		memset(current.keys, 0, sizeof(current.keys));
@@ -91,20 +90,10 @@ struct {
 	v2i mousePosition() { return current.mouse.position; }
 	v2i mouseDelta() { return current.mouse.delta; }
 	i32 mouseWheel() { return current.mouse.wheel; }
+	std::string const& string() { return chars; }
 
 } input;
 
-i64 getPerfCounter() {
-	LARGE_INTEGER r;
-	QueryPerformanceCounter(&r);
-	return r.QuadPart;
-}
-i64 const perfFrequency = [] {
-	LARGE_INTEGER r;
-	QueryPerformanceFrequency(&r);
-	return r.QuadPart;
-}();
-f32 getPerfSeconds(i64 begin, i64 end) { return f32(end - begin) / perfFrequency; }
 struct {
 	u64 frameCount;
 	f32 targetFrameTime;
@@ -120,6 +109,10 @@ HWND createWindow(HINSTANCE instance) {
 	wc.hInstance = instance;
 	wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT {
 		switch (msg) {
+			case WM_CHAR: {
+				input.chars.push_back((char)wp);
+				return 0;
+			}
 			case WM_DESTROY: {
 				isRunning = false;
 				return 0;
@@ -171,10 +164,15 @@ struct LightCall {
 	v3 color;
 	f32 radius;
 };
+struct Label {
+	v2i p;
+	std::string text;
+};
 struct RenderFrameInfo {
 	m3 camMatrix;
 	std::vector<DrawCall> drawCalls;
 	std::vector<LightCall> lights;
+	std::vector<Label> labels;
 };
 struct Renderer {
 	struct Shader {
@@ -222,12 +220,13 @@ struct Renderer {
 	ID3D11RenderTargetView* backBuffer = 0;
 	ID3D11Buffer* screenInfoCB;
 	ID3D11ShaderResourceView* atlasTexture;
+	ID3D11ShaderResourceView* fontTexture;
 	ID3D11SamplerState* testSampler;
 	ID3D11BlendState* alphaBlend;
 	ID3D11BlendState* additiveBlend;
 	ID3D11Buffer* tileVertexBuffer;
-	ID3D11ShaderResourceView* tileVertexBufferView;
 	ID3D11Buffer* lightVertexBuffer;
+	ID3D11ShaderResourceView* tileVertexBufferView;
 	ID3D11ShaderResourceView* lightVertexBufferView;
 
 	Shader tileShader, lightShader, msaaResolveShader;
@@ -277,7 +276,8 @@ struct Renderer {
 		lightShader = makeShader(LDATA "shaders/light.hlsl");
 		msaaResolveShader = makeShader(LDATA "shaders/msaa.hlsl");
 
-		DHR(D3DX11CreateShaderResourceViewFromFileA(device, DATA "tex/atlas.png", 0, 0, &atlasTexture, 0));
+		DHR(D3DX11CreateShaderResourceViewFromFileA(device, DATA "textures/atlas.png", 0, 0, &atlasTexture, 0));
+		DHR(D3DX11CreateShaderResourceViewFromFileA(device, DATA "textures/font.png", 0, 0, &fontTexture, 0));
 
 		{
 			D3D11_SAMPLER_DESC desc{};
@@ -322,14 +322,14 @@ struct Renderer {
 		memcpy(mapped.pData, &screenInfoCBD, sizeof(screenInfoCBD));
 		immediateContext->Unmap(screenInfoCB, 0);
 	}
-	void renderFrame(RenderFrameInfo frame) {
+	void renderFrame(RenderFrameInfo&& frame) {
 #define ATLAS_SIZE	  2
 #define TILE_SIZE	  64
 #define INV_TILE_SIZE (1.0f / TILE_SIZE)
 		tileVertices.clear();
 		for (auto dc : frame.drawCalls) {
 			for (u32 i = 0; i < 4; ++i) {
-				static const TileVertex baseVerts[]{
+				static TileVertex const baseVerts[]{
 					{{}, {-.5, -.5}, v2{INV_TILE_SIZE, 1 - INV_TILE_SIZE} / ATLAS_SIZE},
 					{{}, {-.5, .5}, v2{INV_TILE_SIZE, INV_TILE_SIZE} / ATLAS_SIZE},
 					{{}, {.5, -.5}, v2{1 - INV_TILE_SIZE, 1 - INV_TILE_SIZE} / ATLAS_SIZE},
@@ -355,8 +355,8 @@ struct Renderer {
 		immediateContext->OMSetRenderTargets(1, &mainTarget.rtv, 0);
 		immediateContext->OMSetBlendState(alphaBlend, v4{}.data(), 0xFFFFFFFF);
 		immediateContext->VSSetShader(tileShader.vs, 0, 0);
-		immediateContext->VSSetShaderResources(0, 1, &tileVertexBufferView);
 		immediateContext->PSSetShader(tileShader.ps, 0, 0);
+		immediateContext->VSSetShaderResources(0, 1, &tileVertexBufferView);
 		immediateContext->Draw(tileCount * 6, 0);
 
 		immediateContext->OMSetRenderTargets(1, &resolveTarget.rtv, 0);
@@ -368,13 +368,13 @@ struct Renderer {
 
 		lightVertices.clear();
 		for (auto l : frame.lights) {
+			static LightVertex const baseVerts[]{
+				{{}, {-1,-1}},
+				{{}, {-1, 1}},
+				{{}, { 1,-1}},
+				{{}, { 1, 1}},
+			};
 			for (u32 i = 0; i < 4; ++i) {
-				static const LightVertex baseVerts[]{
-					{{}, {-.5, -.5}},
-					{{}, {-.5, .5}},
-					{{}, {.5, -.5}},
-					{{}, {.5, .5}},
-				};
 				LightVertex vert = baseVerts[i];
 				// vert.pos *= l.radius;
 				vert.pos = (frame.camMatrix * (m3::translation(l.position) * V3(vert.pos * l.radius, 1))).xy;
@@ -392,10 +392,55 @@ struct Renderer {
 		immediateContext->OMSetBlendState(additiveBlend, v4{}.data(), 0xFFFFFFFF);
 		immediateContext->OMSetRenderTargets(1, &backBuffer, 0);
 		immediateContext->VSSetShader(lightShader.vs, 0, 0);
-		immediateContext->VSSetShaderResources(0, 1, &lightVertexBufferView);
 		immediateContext->PSSetShader(lightShader.ps, 0, 0);
+		immediateContext->VSSetShaderResources(0, 1, &lightVertexBufferView);
 		immediateContext->PSSetShaderResources(0, 1, &resolveTarget.srv);
 		immediateContext->Draw(lightCount * 6, 0);
+
+		tileVertices.clear();
+		f32 const textScale = 16.0f;
+		f32 const letterWidth = 3.0f / 4.0f;
+		f32 const cwo2 = 2.0f / clientSize.x;
+		f32 const cho2 = 2.0f / clientSize.y;
+		u32 letterCount = 0;
+		for (auto& l : frame.labels) {
+			// clang-format off
+			m3 textMatrix = {
+				textScale * cwo2 * letterWidth,  0,                                 0, 
+				0,                               textScale * cho2,                  0, 
+				l.p.x * cwo2 - 1,                (clientSize.y - l.p.y) * cho2 - 1, 1,
+			};
+			// clang-format on
+
+			f32 row = 0.0f;
+			f32 column = 0.0f;
+			for (unsigned char c : l.text) {
+				if (c == '\n') {
+					row -= 1.0f;
+					column = 0.0f;
+					continue;
+				}
+				float u = (c % 16) * 0.0625f;
+				float v = (c / 16) * 0.0625f;
+				tileVertices.push_back({V4(1), (textMatrix * v3{column, row - 1.0f, 1}).xy, {u, v + 0.0625f}});
+				tileVertices.push_back({V4(1), (textMatrix * v3{column, row, 1}).xy, {u, v}});
+				tileVertices.push_back(
+					{V4(1), (textMatrix * v3{column + 1.0f, row - 1.0f, 1}).xy, {u + 0.0625f, v + 0.0625f}});
+				tileVertices.push_back({V4(1), (textMatrix * v3{column + 1.0f, row, 1}).xy, {u + 0.0625f, v}});
+				column += 1.0f;
+			}
+			letterCount += l.text.size();
+		}
+		DHR(immediateContext->Map(tileVertexBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped));
+		memcpy(mapped.pData, tileVertices.data(), tileVertices.size() * sizeof(TileVertex));
+		immediateContext->Unmap(tileVertexBuffer, 0);
+
+		immediateContext->OMSetBlendState(alphaBlend, v4{}.data(), 0xFFFFFFFF);
+		immediateContext->VSSetShader(tileShader.vs, 0, 0);
+		immediateContext->PSSetShader(tileShader.ps, 0, 0);
+		immediateContext->VSSetShaderResources(0, 1, &tileVertexBufferView);
+		immediateContext->PSSetShaderResources(0, 1, &fontTexture);
+		immediateContext->Draw(letterCount * 6, 0);
 
 		swapChain->Present(1, 0);
 	}
@@ -511,7 +556,7 @@ struct Renderer {
 };
 Renderer* createRenderer(HWND hwnd, RenderSettings& settings) { return new Renderer(hwnd, settings); }
 void resizeRenderer(Renderer* renderer) { renderer->resize(); }
-void renderFrame(Renderer* renderer, RenderFrameInfo const& frame) { renderer->renderFrame(frame); }
+void renderFrame(Renderer* renderer, RenderFrameInfo&& frame) { renderer->renderFrame(std::move(frame)); }
 
 struct {
 	void push(Network::ClientMessage msg) { clientQueue.push_back(std::move(msg)); }
@@ -526,13 +571,77 @@ struct {
 	std::vector<Network::ClientMessage> clientQueue;
 	SPSC::CircularQueue<Network::ServerMessage, 1024> queue;
 	SOCKET socket = INVALID_SOCKET;
+	bool volatile canShutdown = false;
 } network;
 
-#define CHUNK_W 32
+enum class JoinResult {
+	ok,
+	error,
+	badIp,
+	noConnection,
+};
+JoinResult joinServer(std::string const& ip) {
+
+	WSADATA wsaData;
+	if (auto err = WSAStartup(MAKEWORD(2, 2), &wsaData); err != 0) {
+		printf("WSAStartup failed: %d\n", err);
+		return JoinResult::error;
+	}
+
+	SOCKADDR_IN addr;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(27015);
+	addr.sin_addr.S_un.S_addr = inet_addr(ip.data());
+	if (addr.sin_addr.S_un.S_addr == INADDR_NONE) {
+		return JoinResult::badIp;
+	}
+
+	network.socket = socket(AF_INET, SOCK_STREAM, 0);
+	if (connect(network.socket, (SOCKADDR*)&addr, sizeof(addr)) != 0) {
+		return JoinResult::noConnection;
+	}
+
+	CloseHandle(CreateThread(
+		0, 0,
+		[](void*) -> DWORD {
+			char recvbuf[sizeof(Network::ServerMessage) * 128];
+			int iResult;
+			for (;;) {
+				iResult = recv(network.socket, recvbuf, _countof(recvbuf), 0);
+				if (iResult > 0) {
+					if (iResult % sizeof(Network::ServerMessage) != 0) {
+						puts("bad messages");
+						continue;
+					}
+					View messages((Network::ServerMessage*)recvbuf, iResult / sizeof(Network::ServerMessage));
+					for (auto& m : messages) {
+						network.queue.push(std::move(m));
+					}
+				} else if (iResult == 0)
+					printf("Connection closed\n");
+				else {
+					if (network.canShutdown) {
+						return 0;
+					}
+					printf("recv failed: %d\n", WSAGetLastError());
+					ASSERT(0);
+				}
+			}
+			return 0;
+		},
+		0, 0, 0));
+	return JoinResult::ok;
+}
+void leaveServer() {
+	network.canShutdown = true;
+	if (shutdown(network.socket, SD_SEND) == SOCKET_ERROR) {
+		printf("shutdown failed: %d\n", WSAGetLastError());
+	}
+	closesocket(network.socket);
+	WSACleanup();
+}
+
 struct Game {
-	struct Tile {
-		bool exists;
-	};
 	struct Bullet {
 		u32 id;
 		f32 remainingLifeTime = 5.0f;
@@ -557,39 +666,49 @@ struct Game {
 		v2 point;
 		v2 normal;
 	};
+	struct Sound {
+		u32 soundIndex;
+		v2 position;
+		f32 pitch = map(randomF32(), -1.0f, 1.0f, 0.9f, 1.1f);
+		f32 sampleIndex = 0;
+	};
+	enum class GameState { menu, enteringIp, game };
 
-	Tile tiles[CHUNK_W][CHUNK_W];
+	Tiles tiles;
 	std::vector<LightCall> lights;
 	std::vector<DrawCall> drawCalls;
 	std::vector<Bullet> bullets;
 	std::vector<Explosion> explosions;
 	std::vector<Ember> embers;
-	v2 playerPosition{1, 1};
+	v2 playerPosition;
 	v2 playerVelocity{};
-	f32 const playerRadius = 0.25f;
+	f32 const playerRadius = 0.35f;
 
 	struct Enemy {
 		v2 position{};
 		bool updatedThisFrame = false;
 	};
 
+	GameState gameState = GameState::menu;
+	bool multiPlayer = false;
 	u32 playerIndex;
+	u32 score = 0;
+	f32 timeInMid = 0;
 	std::unordered_map<u32, Enemy> enemies;
 
 	f32 cameraZoom = 1.0f;
 	v2 cameraPos{};
 
 	f32 fireTimer = 0.0f;
-	f32 fireDelta = 0.1f;
+	f32 fireDelta = 1.0f;
+	i32 shotsAtOnce = 1;
 
 	v2 pixelsInMeters{};
 	u32 const tileSize = 64;
 
-	i32 randomSeed = 0;
+	std::vector<std::vector<i16>> soundBuffers;
+	std::vector<Sound> sounds;
 
-	auto randomF32() { return (randomSeed = randomize(randomSeed) / 256) * (1.0f / 8388608.f); }
-	auto randomBool() { return (randomSeed = randomize(randomSeed)) & 0x10; }
-	auto randomI32() { return randomSeed = randomize(randomSeed); }
 	Hit raycastLine(v2 a, v2 b, v2 c, v2 d) {
 		Hit hit;
 
@@ -639,6 +758,13 @@ struct Game {
 			hit = hits[minIndex];
 		}
 		return hit;
+	}
+
+	void hitEnemy(u32 enemyIndex) {
+		sounds.push_back({2, playerPosition});
+		network.push(Network::PlayerHit{enemyIndex});
+		++score;
+		fireDelta = 1.0f / (score * 0.05f + 1.0f);
 	}
 
 	Hit raycastCircle(v2 a, v2 b, v2 circle, f32 radius) {
@@ -721,7 +847,7 @@ struct Game {
 					continue;
 				}
 				if (hit = raycastCircle(a, b, e.position, playerRadius); hit.hit) {
-					network.push(Network::PlayerHit{k});
+					hitEnemy(k);
 					return hit;
 				}
 			}
@@ -751,31 +877,113 @@ struct Game {
 	};
 
 	Game() {
-		for (int x = 0; x < CHUNK_W; ++x) {
-			tiles[x][0].exists = true;
-			tiles[x][CHUNK_W - 1].exists = true;
+		std::vector<i16> testSound;
+		u32 soundLength = 24000;
+		testSound.reserve(soundLength);
+		for (u32 i = 0; i < soundLength; ++i) {
+			f32 pitch = map(i, 0.0f, soundLength, 2.0f, 1.5f);
+			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.0f);
+			volume *= volume;
+			f32 sample = 0;
+			sample += (sin(i * PI / 451.0f * pitch) * 2 - 1);
+			sample += sin(i * PI / 105.0f * pitch) * sin(i * PI / 157.0f * pitch) * 4;
+			sample *= 0.005 * volume;
+			// testSound.push_back((i16)(sample * 32767));
+			testSound.push_back(((i16)((i8)(sample * 127))) * 256);
 		}
-		for (int y = 0; y < CHUNK_W; ++y) {
-			tiles[0][y].exists = true;
-			tiles[CHUNK_W - 1][y].exists = true;
+		soundBuffers.push_back(std::move(testSound));
+		testSound.clear();
+		testSound.reserve(soundLength);
+		for (u32 i = 0; i < soundLength; ++i) {
+			f32 pitch = map(i, 0.0f, soundLength, 2.0f, 1.5f);
+			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.0f);
+			volume *= volume;
+			f32 sample = 0;
+			sample += (sin(i * PI / 551.0f * pitch) * 2 - 1);
+			sample += sin(i * PI / 175.0f) * sin(i * PI / 217.0f * pitch) * 4;
+			sample *= 0.005 * volume;
+			// testSound.push_back((i16)(sample * 32767));
+			testSound.push_back(((i16)((i8)(sample * 127))) * 256);
 		}
-		for (int x = 1; x < CHUNK_W - 1; ++x) {
-			for (int y = 1; y < CHUNK_W - 1; ++y) {
-				tiles[x][y].exists = !(randomI32() & 0x70);
-			}
+		soundBuffers.push_back(std::move(testSound));
+		testSound.clear();
+		testSound.reserve(soundLength);
+		for (u32 i = 0; i < soundLength; ++i) {
+			f32 pitchBase = map(i, 0.0f, soundLength, 0.0f, 3.0f);
+			f32 pitch = frac(pitchBase) * 2 + map(TL::floor(pitchBase), 0, 2, 1, 2);
+			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.0f);
+			volume *= volume;
+			f32 sample = 0;
+			sample += (sin(i * PI / 551.0f * pitch) * 2 - 1);
+			sample += sin(i * PI / 175.0f) * sin(i * PI / 217.0f * pitch) * 4;
+			sample *= 0.01 * volume;
+			// testSound.push_back((i16)(sample * 32767));
+			testSound.push_back(((i16)((i8)(sample * 127))) * 256);
 		}
-		for (int x = 1; x < 3; ++x) {
-			for (int y = 1; y < 3; ++y) {
-				tiles[x][y].exists = false;
-				tiles[CHUNK_W - 1 - x][y].exists = false;
-				tiles[CHUNK_W - 1 - x][CHUNK_W - 1 - y].exists = false;
-				tiles[x][CHUNK_W - 1 - y].exists = false;
-			}
+		soundBuffers.push_back(std::move(testSound));
+		testSound.clear();
+		testSound.reserve(soundLength);
+		for (u32 i = 0; i < soundLength; ++i) {
+			f32 pitchBase = map(i, 0.0f, soundLength, 0.0f, 3.0f);
+			f32 pitch = powf(2, map(TL::floor(pitchBase), 0, 2, 1, 2) +
+								map(TL::floor(pitchBase * 3) / 3, 0, 2, 1, 2));
+			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.5f);
+			volume *= volume;
+			f32 sample = 0;
+			sample += (sin(i * PI / 551.0f * pitch) * 2 - 1);
+			sample += sin(i * PI / 175.0f) * sin(i * PI / 217.0f * pitch) * 4;
+			sample *= 0.01 * volume;
+			// testSound.push_back((i16)(sample * 32767));
+			testSound.push_back(((i16)((i8)(sample * 127))) * 256);
 		}
+		soundBuffers.push_back(std::move(testSound));
+
+		playerPosition = (v2)(v2i{randomI32() & 1, randomI32() & 1} * (CHUNK_W - 3) + 1);
 		bullets.reserve(128);
 		explosions.reserve(128);
 		embers.reserve(1024);
 	}
+	~Game() {
+		if (multiPlayer) {
+			leaveServer();
+		}
+	}
+
+	struct {
+		f32 Volume;
+		f32 TargetVolume;
+		f32 Frequency;
+		f32 Time;
+	} notes[33]{};
+
+	u32 samplesPerSecond = 48000;
+
+	void fillSoundBuffer(i16* sample, u32 sampleCount) {
+		std::vector<f32> volumes;
+		volumes.reserve(sounds.size());
+		f32 const volumeFalloff = 10;
+		for (auto& s : sounds) {
+			f32 dist = distance(s.position, playerPosition);
+			volumes.push_back(pow2(volumeFalloff / (dist + volumeFalloff)));
+		}
+		for (u32 i = 0; i < sampleCount; ++i) {
+			i16 newSample = 0;
+			auto volumeIt = volumes.begin();
+			for (auto& s : sounds) {
+				auto& buf = soundBuffers[s.soundIndex];
+				u32 sampleIndex = (u32)s.sampleIndex;
+				f32 volume = *volumeIt++;
+				if (sampleIndex >= buf.size()) {
+					continue;
+				}
+				newSample += buf[sampleIndex] * volume;
+				s.sampleIndex += s.pitch;
+			}
+			*sample++ = newSample;
+			*sample++ = newSample;
+		}
+	}
+
 	void updateBullets() {
 		for (u32 i = 0; i < bullets.size(); ++i) {
 			auto& b = bullets[i];
@@ -805,6 +1013,7 @@ struct Game {
 					e.rotationOffset = randomF32();
 					embers.push_back(e);
 				}
+				sounds.push_back({1, ex.position});
 				continue;
 			}
 			b.position = nextPos;
@@ -840,6 +1049,97 @@ struct Game {
 		}
 	}
 	void update(Renderer* renderer) {
+		notes[0].TargetVolume = input.keyHeld('Z');
+		notes[1].TargetVolume = input.keyHeld('S');
+		notes[2].TargetVolume = input.keyHeld('X');
+		notes[3].TargetVolume = input.keyHeld('D');
+		notes[4].TargetVolume = input.keyHeld('C');
+		notes[5].TargetVolume = input.keyHeld('V');
+		notes[6].TargetVolume = input.keyHeld('G');
+		notes[7].TargetVolume = input.keyHeld('B');
+		notes[8].TargetVolume = input.keyHeld('H');
+		notes[9].TargetVolume = input.keyHeld('N');
+		notes[10].TargetVolume = input.keyHeld('J');
+		notes[11].TargetVolume = input.keyHeld('M');
+		notes[12].TargetVolume = input.keyHeld('Q') || input.keyHeld(VK_OEM_COMMA);
+		notes[13].TargetVolume = input.keyHeld('2') || input.keyHeld('L');
+		notes[14].TargetVolume = input.keyHeld('W') || input.keyHeld(VK_DECIMAL);
+		notes[15].TargetVolume = input.keyHeld('3') || input.keyHeld(VK_OEM_1);
+		notes[16].TargetVolume = input.keyHeld('E') || input.keyHeld(VK_OEM_2);
+		notes[17].TargetVolume = input.keyHeld('R');
+		notes[18].TargetVolume = input.keyHeld('5');
+		notes[19].TargetVolume = input.keyHeld('T');
+		notes[20].TargetVolume = input.keyHeld('6');
+		notes[21].TargetVolume = input.keyHeld('Y');
+		notes[22].TargetVolume = input.keyHeld('7');
+		notes[23].TargetVolume = input.keyHeld('U');
+		notes[24].TargetVolume = input.keyHeld('I');
+		notes[25].TargetVolume = input.keyHeld('9');
+		notes[26].TargetVolume = input.keyHeld('O');
+		notes[27].TargetVolume = input.keyHeld('0');
+		notes[28].TargetVolume = input.keyHeld('P');
+		notes[29].TargetVolume = input.keyHeld(VK_OEM_4);
+		notes[30].TargetVolume = input.keyHeld(VK_OEM_PLUS);
+		notes[31].TargetVolume = input.keyHeld(VK_OEM_6);
+		notes[32].TargetVolume = input.keyHeld(VK_OEM_5);
+		switch (gameState) {
+			case Game::GameState::menu: {
+				std::vector<Label> labels;
+				labels.push_back({(v2i)clientSize / 4, "Press"});
+				labels.push_back({(v2i)clientSize / 4 + v2i{0, 16}, "'Enter' to start single player"});
+				labels.push_back({(v2i)clientSize / 4 + v2i{0, 32}, "'Space' to join a server"});
+
+				if (input.keyDown(VK_RETURN)) {
+					multiPlayer = false;
+					gameState = GameState::game;
+				} else if (input.keyDown(' ')) {
+					multiPlayer = true;
+					gameState = GameState::enteringIp;
+				}
+
+				RenderFrameInfo frame;
+				frame.labels = std::move(labels);
+				renderFrame(renderer, std::move(frame));
+				break;
+			}
+			case Game::GameState::enteringIp: {
+				static std::string inputIp;
+				static std::string joinString;
+				std::vector<Label> labels;
+				labels.push_back({(v2i)clientSize / 4 - v2i{0, 16}, joinString});
+				labels.push_back({(v2i)clientSize / 4, "Enter ip address or 'local'"});
+				labels.push_back({(v2i)clientSize / 4 + v2i{0, 16}, inputIp});
+
+				for (auto c : input.string()) {
+					if (c == '\b') {
+						if (inputIp.size())
+							inputIp.pop_back();
+					} else if (c != '\r')
+						inputIp.push_back(c);
+				}
+
+				if (input.keyDown(VK_RETURN)) {
+					if (inputIp == "local")
+						inputIp = "127.0.0.1";
+					switch (joinServer(inputIp)) {
+						case JoinResult::badIp: joinString = "Bad IP address"; break;
+						case JoinResult::noConnection: joinString = "Failed to connect to the server"; break;
+						case JoinResult::ok: gameState = GameState::game; break;
+						case JoinResult::error: joinString = "An error occurred"; break;
+					}
+				} else if (input.keyDown(VK_ESCAPE)) {
+					gameState = GameState::menu;
+				}
+
+				RenderFrameInfo frame;
+				frame.labels = std::move(labels);
+				renderFrame(renderer, std::move(frame));
+				break;
+			}
+			case Game::GameState::game: updateGame(renderer); break;
+		}
+	}
+	void updateGame(Renderer* renderer) {
 		if (multiPlayer) {
 			for (;;) {
 				if (auto opt = network.pop()) {
@@ -873,7 +1173,7 @@ struct Game {
 											   } while (tiles[newPos.x][newPos.y].exists);
 											   playerPosition = (v2)newPos;
 										   },
-										   [](auto) {}},
+										   [&](Network::GetTiles& gt) { tiles = gt.tiles; }, [](auto) {}},
 								   *opt);
 					} catch (...) {
 						puts("std::visit failed");
@@ -883,8 +1183,14 @@ struct Game {
 				}
 			}
 		}
-
-		cameraZoom -= input.mouseWheel() * 0.01f;
+		for (u32 i = 0; i < sounds.size(); ++i) {
+			auto& s = sounds[i];
+			if (s.sampleIndex >= soundBuffers[s.soundIndex].size()) {
+				sounds.erase(sounds.begin() + i);
+				--i;
+			}
+		}
+		cameraZoom -= input.mouseWheel() / 240.0f;
 		cameraZoom = clamp(cameraZoom, 1, 10);
 
 		v2 move{};
@@ -988,6 +1294,15 @@ struct Game {
 		if (multiPlayer)
 			network.push(Network::PositionChange{playerIndex, playerPosition});
 
+		if (manhattan(playerPosition, V2(CHUNK_W / 2)) < midRadius) {
+			timeInMid += time.delta;
+			static auto oldShots = shotsAtOnce;
+			shotsAtOnce = u32(timeInMid / 30) + 1;
+			if (oldShots != shotsAtOnce)
+				sounds.push_back({3, playerPosition});
+			oldShots = shotsAtOnce;
+		}
+
 		cameraPos = lerp(cameraPos, playerPosition, time.delta * (distance(cameraPos, playerPosition) + 5));
 		v2 camOffset = cameraPos - (v2)clientSize * 0.5f / cameraZoom;
 
@@ -999,18 +1314,38 @@ struct Game {
 		if (input.mouseHeld(0)) {
 			if (fireTimer < 0) {
 				fireTimer += fireDelta;
-				static u32 bulletCounter = 0;
-				Bullet b;
-				v2i mousePos = input.mousePosition();
-				mousePos.y = clientSize.y - mousePos.y;
-				b.direction = normalize((v2)mousePos - (v2)clientSize / 2 -
-										(playerPosition - cameraPos) * pixelsInMeters * 2.0f);
-				b.position = playerPosition;
-				b.id = Network::makeBulletID(playerIndex, bulletCounter++);
-				bullets.push_back(b);
-				if (multiPlayer)
-					network.push(Network::CreateBullet{b.id, b.position, b.direction});
+				auto createBullet = [&](f32 offset) {
+					static u32 bulletCounter = 0;
+					Bullet b;
+					v2i mousePos = input.mousePosition();
+					mousePos.y = clientSize.y - mousePos.y;
+					b.direction = normalize((v2)mousePos - (v2)clientSize / 2 -
+											(playerPosition - cameraPos) * pixelsInMeters * 2.0f);
+					b.direction = normalize(b.direction + cross(b.direction) * offset * 0.5f);
+					b.position = playerPosition;
+					b.id = Network::makeBulletID(playerIndex, bulletCounter++);
+					bullets.push_back(b);
+					if (multiPlayer)
+						network.push(Network::CreateBullet{b.id, b.position, b.direction});
+				};
+				if (shotsAtOnce == 1) {
+					createBullet(0);
+				} else {
+					if (shotsAtOnce & 1) {
+						for (i32 i = -shotsAtOnce / 2; i <= shotsAtOnce / 2; ++i) {
+							createBullet(f32(i) / shotsAtOnce);
+						}
+					} else {
+						for (i32 i = 0; i < shotsAtOnce; ++i) {
+							createBullet(f32(i - shotsAtOnce * 0.5f + 0.5f) / shotsAtOnce);
+						}
+					}
+				}
+				sounds.push_back({0, playerPosition});
 			}
+		}
+		if (input.keyDown(VK_ESCAPE)) {
+			gameState = GameState::menu;
 		}
 
 		v2 camScale = V2(1.0f / cameraZoom);
@@ -1034,7 +1369,7 @@ struct Game {
 			f32 t = e.remainingLifeTime / e.maxLifeTime;
 			submitTile(3, m3::translation(e.position) * m3::rotationZ((t + e.rotationOffset) * 10),
 					   V4(V3(t * 2 + 2), t), 1 - pow2(1 - t));
-			submitLight(e.position, v3{1, 0.5, 0.1} * t * 2, t * 10);
+			submitLight(e.position, v3{1, 0.5, 0.1} * t * 4, t * 5);
 		}
 		for (auto e : embers) {
 			f32 t = e.remainingLifeTime / e.maxLifeTime;
@@ -1042,14 +1377,25 @@ struct Game {
 					   V4(V3(t * 2 + 2), t), 1 - pow2(1 - t));
 		}
 		submitTile(0, m3::translation(playerPosition));
-		submitLight(playerPosition, {1, 1, 1}, 30);
+		submitLight(playerPosition, {1, 1, 1}, 15);
+		submitLight(V2(CHUNK_W/2-0.5f), v3{0.3, 0.9, 0.6} * 2, midRadius);
 
 		for (auto& [k, e] : enemies) {
 			submitTile(0, m3::translation(e.position));
-			submitLight(e.position, {1, .1, .1}, 30);
+			submitLight(e.position, {1, .3, .3}, 15);
 		}
 
-		renderFrame(renderer, {camMatrix, drawCalls, lights});
+		std::vector<Label> labels;
+		labels.push_back({{16, 16}, std::string("Score: ") + std::to_string(score)});
+		labels.push_back({{16, 32}, std::string("Time in mid: ") + std::to_string(timeInMid)});
+
+		RenderFrameInfo frame;
+		frame.camMatrix = camMatrix;
+		frame.drawCalls = std::move(drawCalls);
+		frame.lights = std::move(lights);
+		frame.labels = std::move(labels);
+		renderFrame(renderer, std::move(frame));
+
 		drawCalls.clear();
 		lights.clear();
 		if (multiPlayer)
@@ -1059,6 +1405,7 @@ struct Game {
 };
 
 Game* createGame() { return new Game; }
+void destroyGame(Game* game) { delete game; }
 void updateGame(Game* game, Renderer* renderer) { game->update(renderer); }
 void resizeGame(Game* game) { game->resize(); }
 
@@ -1069,86 +1416,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 	freopen("CONOUT$", "w", stdout);
 	freopen("CONIN$", "r", stdin);
 
-	puts("Start multiplayer?");
-	std::string mp;
-	std::cin >> mp;
-
-	multiPlayer = mp != "0" && mp != "false";
-
-	DEFER {
-		if (multiPlayer) {
-			WSACleanup();
-		}
-	};
-	if (multiPlayer) {
-
-		WSADATA wsaData;
-		if (auto err = WSAStartup(MAKEWORD(2, 2), &wsaData); err != 0) {
-			printf("WSAStartup failed: %d\n", err);
-			return 1;
-		}
-
-		SOCKADDR_IN addr;
-		addr.sin_family = AF_INET;
-		addr.sin_port = htons(27015);
-		do {
-			puts("Enter server ip address. You can enter 'local' to connect to your local server");
-			std::string ip;
-			std::cin >> ip;
-			if (ip == "local")
-				ip = "127.0.0.1";
-			addr.sin_addr.S_un.S_addr = inet_addr(ip.data());
-		} while (addr.sin_addr.S_un.S_addr == INADDR_NONE);
-
-		network.socket = socket(AF_INET, SOCK_STREAM, 0);
-		if (connect(network.socket, (SOCKADDR*)&addr, sizeof(addr)) != 0) {
-			puts("Failed to connect to server");
-			system("pause");
-			return -1;
-		}
-
-#define DEFAULT_BUFLEN 512
-
-		int iResult;
-
-		CloseHandle(CreateThread(
-			0, 0,
-			[](void*) -> DWORD {
-				char recvbuf[DEFAULT_BUFLEN];
-				int iResult;
-				for (;;) {
-					iResult = recv(network.socket, recvbuf, _countof(recvbuf), 0);
-					if (iResult > 0) {
-						if (iResult % sizeof(Network::ServerMessage) != 0) {
-							puts("bad messages");
-							continue;
-						}
-						View messages((Network::ServerMessage*)recvbuf, iResult / sizeof(Network::ServerMessage));
-						for (auto& m : messages) {
-							network.queue.push(std::move(m));
-						}
-					} else if (iResult == 0)
-						printf("Connection closed\n");
-					else
-						printf("recv failed: %d\n", WSAGetLastError());
-				}
-				while (iResult > 0)
-					;
-				return 0;
-			},
-			0, 0, 0));
-	}
-	DEFER {
-		if (multiPlayer) {
-			int iResult = shutdown(network.socket, SD_SEND);
-			if (iResult == SOCKET_ERROR) {
-				printf("shutdown failed: %d\n", WSAGetLastError());
-				closesocket(network.socket);
-				ASSERT(0);
-			}
-			closesocket(network.socket);
-		}
-	};
 	auto hwnd = createWindow(instance);
 
 	input.init();
@@ -1159,6 +1426,62 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 
 	Game* game = createGame();
 
+	LPDIRECTSOUND DirectSound;
+	DHR(DirectSoundCreate(0, &DirectSound, 0));
+	DHR(DirectSound->SetCooperativeLevel(hwnd, DSSCL_PRIORITY));
+
+	DSBUFFERDESC BufferDesc = {};
+	BufferDesc.dwSize = sizeof(BufferDesc);
+	BufferDesc.dwFlags = DSBCAPS_PRIMARYBUFFER;
+
+	LPDIRECTSOUNDBUFFER PrimaryBuffer;
+	DHR(DirectSound->CreateSoundBuffer(&BufferDesc, &PrimaryBuffer, 0));
+
+	WAVEFORMATEX WaveFormat;
+
+	WaveFormat.wFormatTag = WAVE_FORMAT_PCM;
+	WaveFormat.nChannels = 2;
+	WaveFormat.nSamplesPerSec = 48000;
+	WaveFormat.wBitsPerSample = 16;
+	u32 bytesPerSample = WaveFormat.wBitsPerSample / 8 * WaveFormat.nChannels;
+	WaveFormat.nBlockAlign = bytesPerSample;
+	WaveFormat.nAvgBytesPerSec = WaveFormat.nBlockAlign * WaveFormat.nSamplesPerSec;
+	WaveFormat.cbSize = sizeof(WaveFormat);
+
+	DHR(PrimaryBuffer->SetFormat(&WaveFormat));
+
+	u32 soundBufferSize = WaveFormat.nSamplesPerSec * bytesPerSample;
+	BufferDesc.dwBufferBytes = soundBufferSize;
+	BufferDesc.dwFlags = 0;
+	BufferDesc.lpwfxFormat = &WaveFormat;
+
+	LPDIRECTSOUNDBUFFER soundBuffer;
+	DHR(DirectSound->CreateSoundBuffer(&BufferDesc, &soundBuffer, 0));
+	u32 runningSampleIndex = 0;
+	auto fillSoundBuffer = [&](DWORD ByteToLock, DWORD BytesToWrite) {
+		void* Region1;
+		void* Region2;
+		DWORD Region1Size;
+		DWORD Region2Size;
+		DHR(soundBuffer->Lock(ByteToLock, BytesToWrite, &Region1, &Region1Size, &Region2, &Region2Size, 0));
+		ASSERT(Region1Size % bytesPerSample == 0);
+		ASSERT(Region2Size % bytesPerSample == 0);
+
+		DWORD Region1SampleCount = Region1Size / bytesPerSample;
+		DWORD Region2SampleCount = Region2Size / bytesPerSample;
+
+		game->fillSoundBuffer((i16*)Region1, Region1SampleCount);
+		game->fillSoundBuffer((i16*)Region2, Region2SampleCount);
+
+		runningSampleIndex += Region1SampleCount + Region2SampleCount;
+
+		DHR(soundBuffer->Unlock(Region1, Region1Size, Region2, Region2Size));
+	};
+	fillSoundBuffer(0, soundBufferSize);
+	DHR(soundBuffer->Play(0, 0, DSBPLAY_LOOPING));
+
+	DWORD LastPlayCursor = 0;
+
 	auto lastPerfCounter = getPerfCounter();
 	while (isRunning) {
 		input.swap();
@@ -1168,6 +1491,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 		}
 		MSG msg{};
 		while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE)) {
+			bool dispatch = true;
 			switch (msg.message) {
 				case WM_KEYUP:
 				case WM_KEYDOWN:
@@ -1182,7 +1506,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 						DestroyWindow(hwnd);
 					}
 					input.processKey(code, extended, alt, isRepeated, wentUp);
-					continue;
+					dispatch = false;
+					break;
 				}
 				case WM_INPUT: {
 					RAWINPUT rawInput;
@@ -1233,7 +1558,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 				}
 			}
 			TranslateMessage(&msg);
-			DispatchMessageA(&msg);
+			if (dispatch)
+				DispatchMessageA(&msg);
 		}
 		{
 			POINT p;
@@ -1248,6 +1574,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 			resizeRenderer(renderer);
 		}
 		updateGame(game, renderer);
+
+		auto latencySampleCount = WaveFormat.nSamplesPerSec / 12;
+		u32 ByteToLock = (runningSampleIndex * bytesPerSample) % soundBufferSize;
+		// DEBUG_HRESULT_CHECK(WinSound.Buffer->GetCurrentPosition(&PlayCursor, &WriteCursor));
+		u32 TargetCursor = (LastPlayCursor + latencySampleCount * bytesPerSample) % soundBufferSize;
+		// Printf("BTL: %u, TC: %u WC: %u\n", ByteToLock, TargetCursor, WriteCursor);
+		u32 BytesToWrite;
+		if (ByteToLock > TargetCursor) {
+			BytesToWrite = soundBufferSize - ByteToLock + TargetCursor;
+		} else {
+			BytesToWrite = TargetCursor - ByteToLock;
+		}
+		if (BytesToWrite) { // TODO: ???
+			fillSoundBuffer(ByteToLock, BytesToWrite);
+		}
+
 		// if (!fullscreen) {
 		auto secondsElapsed = getPerfSeconds(lastPerfCounter, getPerfCounter());
 		if (secondsElapsed < time.targetFrameTime) {
@@ -1266,10 +1608,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
 		time.time += time.delta;
 		++time.frameCount;
 
+		DWORD PlayCursor;
+		DWORD WriteCursor;
+		DHR(soundBuffer->GetCurrentPosition(&PlayCursor, &WriteCursor));
+
+		LastPlayCursor = PlayCursor;
+
 		char buf[256];
 		sprintf(buf, "Dunger! | delta: %.1fms", time.delta * 1000);
 		SetWindowTextA(hwnd, buf);
 	}
+	destroyGame(game);
 
 	return 0;
 }

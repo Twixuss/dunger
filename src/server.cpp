@@ -3,7 +3,7 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
-#include "network.h"
+#include "shared.h"
 #include <WS2tcpip.h>
 #include <winsock2.h>
 
@@ -75,6 +75,9 @@ int main(int argc, char** argv) {
 		}
 		messages.clear();
 	};
+	
+	std::array<std::array<Tile, CHUNK_W>, CHUNK_W> tiles = generateMap();
+	
 
 	struct Player {
 		u32 index;
@@ -100,14 +103,16 @@ int main(int argc, char** argv) {
 
 		printf("index: %u\n", newPlayer.index);
 		send(newPlayer.socket, AssignIndex{newPlayer.index});
+		send(newPlayer.socket, GetTiles{tiles});
 		for (auto& other : players) {
-			send(other.socket, PlayerConnected{newPlayer.index});
 			send(newPlayer.socket, PlayerConnected{other.index});
+			send(other.socket, PlayerConnected{newPlayer.index});
 		}
 		players.push_back(newPlayer);
 
 		FD_SET(socket, &master);
 	};
+
 
 	/*
 	for (;;) {
@@ -162,7 +167,7 @@ int main(int argc, char** argv) {
 				registerPlayer(clientSocket);
 			} else {
 				auto& player = getPlayerFromSocket(socket);
-				char recvbuf[sizeof(ClientMessage) * 1024];
+				char recvbuf[sizeof(ClientMessage) * 128];
 				int iResult = recv(socket, recvbuf, _countof(recvbuf), 0);
 				if (iResult > 0) {
 					if (iResult % sizeof(ClientMessage) != 0) {

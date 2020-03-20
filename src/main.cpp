@@ -14,7 +14,7 @@ using namespace TL;
 #include <vector>
 
 #include "..\dep\Microsoft DirectX SDK\Include\D3DX11.h"
-#pragma comment(lib, "../dep/Microsoft DirectX SDK/Lib/x64/d3dx11.lib")
+#pragma comment(lib, "d3dx11.lib")
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "dsound.lib")
 #pragma comment(lib, "dxguid.lib")
@@ -369,10 +369,10 @@ struct Renderer {
 		lightVertices.clear();
 		for (auto l : frame.lights) {
 			static LightVertex const baseVerts[]{
-				{{}, {-1,-1}},
+				{{}, {-1, -1}},
 				{{}, {-1, 1}},
-				{{}, { 1,-1}},
-				{{}, { 1, 1}},
+				{{}, {1, -1}},
+				{{}, {1, 1}},
 			};
 			for (u32 i = 0; i < 4; ++i) {
 				LightVertex vert = baseVerts[i];
@@ -604,7 +604,7 @@ JoinResult joinServer(std::string const& ip) {
 	CloseHandle(CreateThread(
 		0, 0,
 		[](void*) -> DWORD {
-			char recvbuf[sizeof(Network::ServerMessage) * 128];
+			char recvbuf[sizeof(Network::ServerMessage) * 1024];
 			int iResult;
 			for (;;) {
 				iResult = recv(network.socket, recvbuf, _countof(recvbuf), 0);
@@ -643,6 +643,7 @@ void leaveServer() {
 
 struct Game {
 	struct Bullet {
+		u32 creator;
 		u32 id;
 		f32 remainingLifeTime = 5.0f;
 		v2 position;
@@ -661,11 +662,6 @@ struct Game {
 		f32 maxLifeTime;
 		f32 rotationOffset;
 	};
-	struct Hit {
-		bool hit;
-		v2 point;
-		v2 normal;
-	};
 	struct Sound {
 		u32 soundIndex;
 		v2 position;
@@ -674,7 +670,7 @@ struct Game {
 	};
 	enum class GameState { menu, enteringIp, game };
 
-	Tiles tiles;
+	Tiles spTiles, mpTiles;
 	std::vector<LightCall> lights;
 	std::vector<DrawCall> drawCalls;
 	std::vector<Bullet> bullets;
@@ -682,11 +678,11 @@ struct Game {
 	std::vector<Ember> embers;
 	v2 playerPosition;
 	v2 playerVelocity{};
-	f32 const playerRadius = 0.35f;
+	u32 playerHealth = 5;
 
 	struct Enemy {
 		v2 position{};
-		bool updatedThisFrame = false;
+		u32 health = 5;
 	};
 
 	GameState gameState = GameState::menu;
@@ -695,6 +691,8 @@ struct Game {
 	u32 score = 0;
 	f32 timeInMid = 0;
 	std::unordered_map<u32, Enemy> enemies;
+
+	f32 leaveTimer = 1;
 
 	f32 cameraZoom = 1.0f;
 	v2 cameraPos{};
@@ -709,122 +707,8 @@ struct Game {
 	std::vector<std::vector<i16>> soundBuffers;
 	std::vector<Sound> sounds;
 
-	Hit raycastLine(v2 a, v2 b, v2 c, v2 d) {
+	Hit raycastBullet(Tiles const& tiles, u32 firingPlayerID, v2 a, v2 b) {
 		Hit hit;
-
-		v2 s1 = b - a;
-		v2 s2 = d - c;
-
-		v2 st = v2{s1.x, s2.x} * (a.y - c.y) - v2{s1.y, s2.y} * (a.x - c.x);
-		st /= s1.x * s2.y - s2.x * s1.y;
-
-		if (st.x >= 0 && st.x <= 1 && st.y >= 0 && st.y <= 1) {
-			hit.point = a + (st.y * s1);
-			hit.normal = c - d;
-			hit.normal = cross(hit.normal);
-			if (dot(b - a, hit.normal) > 0)
-				hit.normal *= -1;
-			hit.hit = true;
-		} else {
-			hit.hit = false;
-		}
-		return hit;
-	}
-	Hit raycastTile(v2 a, v2 b, v2 tile, float size) {
-		Hit hit;
-		f32 const w = size;
-		// clang-format off
-			Hit hits[]{
-				raycastLine(a, b, tile + v2{-w, w}, tile + v2{ w, w}),
-				raycastLine(a, b, tile + v2{ w, w}, tile + v2{ w,-w}),
-				raycastLine(a, b, tile + v2{ w,-w}, tile + v2{-w,-w}),
-				raycastLine(a, b, tile + v2{-w,-w}, tile + v2{-w, w}),
-			};
-		// clang-format on
-		f32 minDist = FLT_MAX;
-		int minIndex = -1;
-		for (int i = 0; i < _countof(hits); ++i) {
-			if (!hits[i].hit)
-				continue;
-			f32 len = lengthSqr(a - hits[i].point);
-			if (len < minDist) {
-				minDist = len;
-				minIndex = i;
-			}
-		}
-		if (minIndex == -1) {
-			hit.hit = false;
-		} else {
-			hit = hits[minIndex];
-		}
-		return hit;
-	}
-
-	void hitEnemy(u32 enemyIndex) {
-		sounds.push_back({2, playerPosition});
-		network.push(Network::PlayerHit{enemyIndex});
-		++score;
-		fireDelta = 1.0f / (score * 0.05f + 1.0f);
-	}
-
-	Hit raycastCircle(v2 a, v2 b, v2 circle, f32 radius) {
-		Hit hit;
-		int intersections = -1;
-		v2 intersection1;
-		v2 intersection2;
-
-		v2 d = b - a;
-
-		f32 A = lengthSqr(d);
-		f32 B = 2 * dot(d, a - circle);
-		f32 C = lengthSqr(a - circle) - radius * radius;
-
-		f32 det = B * B - 4 * A * C;
-		if ((A <= 0.0000001) || (det < 0)) {
-			// No real solutions.
-			intersection1 = {NAN, NAN};
-			intersection2 = {NAN, NAN};
-			intersections = 0;
-		} else if (det == 0) {
-			// One solution.
-			f32 t = -B / (2 * A);
-			intersection1 = a + t * d;
-			intersection2 = {NAN, NAN};
-			intersections = 1;
-		} else {
-			// Two solutions.
-			f32 s = sqrtf(det);
-			intersection1 = a + ((-B + s) / (2 * A)) * d;
-			intersection2 = a + ((-B - s) / (2 * A)) * d;
-			intersections = 2;
-		}
-
-		hit.hit = true;
-		if (intersections == 1) {
-			hit.point = intersection1; // one intersection
-		} else if (intersections == 2) {
-			f32 dist1 = distanceSqr(intersection1, a);
-			f32 dist2 = distanceSqr(intersection2, a);
-
-			if (dist1 < dist2)
-				hit.point = intersection1;
-			else
-				hit.point = intersection2;
-		} else {
-			hit.hit = false;
-		}
-		if (hit.hit) {
-			if (distanceSqr(a, hit.point) > distanceSqr(a, b)) {
-				hit.hit = false;
-			} else {
-				hit.normal = normalize(circle - hit.point);
-			}
-		}
-
-		return hit; // no intersections at all
-	}
-	Hit raycastBullet(u32 firingPlayerID, v2 a, v2 b) {
-		Hit hit{};
 		v2 tMin, tMax;
 		minmax(a, b, tMin, tMax);
 		v2i tMini = max(roundInt(tMin), V2i(0));
@@ -833,7 +717,7 @@ struct Game {
 			for (i32 ty = tMini.y; ty < tMaxi.y; ++ty) {
 				ASSERT(tx < CHUNK_W);
 				ASSERT(ty < CHUNK_W);
-				if (!tiles[tx][ty].exists)
+				if (!tiles.get(tx, ty))
 					continue;
 				v2 normal;
 				if (hit = raycastTile(a, b, V2(tx, ty), 0.5f); hit.hit) {
@@ -841,20 +725,17 @@ struct Game {
 				}
 			}
 		}
-		if (multiPlayer) {
-			for (auto& [k, e] : enemies) {
-				if (k == firingPlayerID) {
-					continue;
-				}
-				if (hit = raycastCircle(a, b, e.position, playerRadius); hit.hit) {
-					hitEnemy(k);
-					return hit;
-				}
+		for (auto& [targetId, target] : enemies) {
+			if (targetId == firingPlayerID) {
+				continue;
 			}
-			if (firingPlayerID != playerIndex) {
-				if (hit = raycastCircle(a, b, playerPosition, playerRadius); hit.hit) {
-					return hit;
-				}
+			if (hit = raycastCircle(a, b, target.position, playerRadius); hit.hit) {
+				return hit;
+			}
+		}
+		if (playerIndex != firingPlayerID) {
+			if (hit = raycastCircle(a, b, playerPosition, playerRadius); hit.hit) {
+				return hit;
 			}
 		}
 		return hit;
@@ -879,66 +760,91 @@ struct Game {
 	Game() {
 		std::vector<i16> testSound;
 		u32 soundLength = 24000;
+		u32 sampleRate = 48000;
+		f32 attack = 500;
+		// shot
+		testSound.reserve(soundLength);
+		for (u32 i = 0; i < soundLength; ++i) {
+			f32 t = i / f32(sampleRate);
+			f32 pitch = map(i, 0.0f, soundLength, 2.0f, 1.5f);
+			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.0f);
+			volume *= volume;
+			volume *= min(i / attack, 1.0f);
+			f32 sample = 0;
+			sample += sign(t * PI * 100.0f * pitch);
+			sample += sin(t * PI * 100 * pitch) * 0.5f + frac(t * 100.0f * pitch) * 2;
+			sample *= 0.005 * volume;
+			 testSound.push_back((i16)(sample * 32767));
+			//testSound.push_back(((i16)((i8)(sample * 127))) * 256);
+		}
+		soundBuffers.push_back(std::move(testSound));
+		testSound.clear();
+		// explosion
 		testSound.reserve(soundLength);
 		for (u32 i = 0; i < soundLength; ++i) {
 			f32 pitch = map(i, 0.0f, soundLength, 2.0f, 1.5f);
 			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.0f);
 			volume *= volume;
+			volume *= min(i / attack, 1.0f);
 			f32 sample = 0;
-			sample += (sin(i * PI / 451.0f * pitch) * 2 - 1);
-			sample += sin(i * PI / 105.0f * pitch) * sin(i * PI / 157.0f * pitch) * 4;
+			sample += (frac(i * PI / 5510.0f * pitch) * 2 - 1);
+			sample += frac(i * PI / 3705.0f) + frac(i * PI / 4170.0f * pitch) * 4;
 			sample *= 0.005 * volume;
-			// testSound.push_back((i16)(sample * 32767));
-			testSound.push_back(((i16)((i8)(sample * 127))) * 256);
+			 testSound.push_back((i16)(sample * 32767));
+			//testSound.push_back(((i16)((i8)(sample * 127))) * 256);
 		}
 		soundBuffers.push_back(std::move(testSound));
 		testSound.clear();
-		testSound.reserve(soundLength);
-		for (u32 i = 0; i < soundLength; ++i) {
-			f32 pitch = map(i, 0.0f, soundLength, 2.0f, 1.5f);
-			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.0f);
-			volume *= volume;
-			f32 sample = 0;
-			sample += (sin(i * PI / 551.0f * pitch) * 2 - 1);
-			sample += sin(i * PI / 175.0f) * sin(i * PI / 217.0f * pitch) * 4;
-			sample *= 0.005 * volume;
-			// testSound.push_back((i16)(sample * 32767));
-			testSound.push_back(((i16)((i8)(sample * 127))) * 256);
-		}
-		soundBuffers.push_back(std::move(testSound));
-		testSound.clear();
+		// hit
 		testSound.reserve(soundLength);
 		for (u32 i = 0; i < soundLength; ++i) {
 			f32 pitchBase = map(i, 0.0f, soundLength, 0.0f, 3.0f);
 			f32 pitch = frac(pitchBase) * 2 + map(TL::floor(pitchBase), 0, 2, 1, 2);
 			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.0f);
 			volume *= volume;
+			volume *= min(i / attack, 1.0f);
 			f32 sample = 0;
 			sample += (sin(i * PI / 551.0f * pitch) * 2 - 1);
 			sample += sin(i * PI / 175.0f) * sin(i * PI / 217.0f * pitch) * 4;
 			sample *= 0.01 * volume;
-			// testSound.push_back((i16)(sample * 32767));
-			testSound.push_back(((i16)((i8)(sample * 127))) * 256);
+			 testSound.push_back((i16)(sample * 32767));
+			//testSound.push_back(((i16)((i8)(sample * 127))) * 256);
 		}
 		soundBuffers.push_back(std::move(testSound));
 		testSound.clear();
+		// lvl up
 		testSound.reserve(soundLength);
 		for (u32 i = 0; i < soundLength; ++i) {
 			f32 pitchBase = map(i, 0.0f, soundLength, 0.0f, 3.0f);
-			f32 pitch = powf(2, map(TL::floor(pitchBase), 0, 2, 1, 2) +
-								map(TL::floor(pitchBase * 3) / 3, 0, 2, 1, 2));
+			f32 pitch = powf(2, map(TL::floor(pitchBase), 0, 2, 1, 2) + map(TL::floor(pitchBase * 3) / 3, 0, 2, 1, 2));
 			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.5f);
 			volume *= volume;
+			volume *= min(i / attack, 1.0f);
 			f32 sample = 0;
 			sample += (sin(i * PI / 551.0f * pitch) * 2 - 1);
 			sample += sin(i * PI / 175.0f) * sin(i * PI / 217.0f * pitch) * 4;
-			sample *= 0.01 * volume;
-			// testSound.push_back((i16)(sample * 32767));
-			testSound.push_back(((i16)((i8)(sample * 127))) * 256);
+			sample *= 0.005 * volume;
+			testSound.push_back((i16)(sample * 32767));
+			//testSound.push_back(((i16)((i8)(sample * 127))) * 256);
+		}
+		soundBuffers.push_back(std::move(testSound));
+		testSound.clear();
+		// get damage
+		soundLength = 12000;
+		testSound.reserve(soundLength);
+		for (u32 i = 0; i < soundLength; ++i) {
+			f32 volume = map(i, 0.0f, soundLength, 1.0f, 0.5f);
+			volume *= volume;
+			volume *= min(i / attack, 1.0f);
+			f32 sample = 0;
+			sample += (sin(i * PI / 551.0f) * 2 - 1);
+			sample += sin(i * PI / 175.0f) * sin(i * PI / 217.0f) * 4;
+			sample *= 0.01 * volume * (frac(f32(i) / soundLength * 20) > 0.5f);
+			 testSound.push_back((i16)(sample * 32767));
+			//testSound.push_back(((i16)((i8)(sample * 127))) * 256);
 		}
 		soundBuffers.push_back(std::move(testSound));
 
-		playerPosition = (v2)(v2i{randomI32() & 1, randomI32() & 1} * (CHUNK_W - 3) + 1);
 		bullets.reserve(128);
 		explosions.reserve(128);
 		embers.reserve(1024);
@@ -948,13 +854,6 @@ struct Game {
 			leaveServer();
 		}
 	}
-
-	struct {
-		f32 Volume;
-		f32 TargetVolume;
-		f32 Frequency;
-		f32 Time;
-	} notes[33]{};
 
 	u32 samplesPerSecond = 48000;
 
@@ -984,36 +883,21 @@ struct Game {
 		}
 	}
 
-	void updateBullets() {
+	void destroyBullet(Bullet& b) { bullets.erase(bullets.begin() + (&b - bullets.data())); };
+	void updateBullets(Tiles const& tiles) {
 		for (u32 i = 0; i < bullets.size(); ++i) {
 			auto& b = bullets[i];
 			b.remainingLifeTime -= time.delta;
-			auto destroyBullet = [&] {
-				bullets.erase(bullets.begin() + i);
-				--i;
-			};
 			if (b.remainingLifeTime <= 0) {
-				destroyBullet();
+				destroyBullet(b);
+				--i;
 				continue;
 			}
 			v2 nextPos = b.position + b.direction * time.delta * 10;
-			if (auto hit = raycastBullet(Network::getPlayerIdFromBulletId(b.id), b.position, nextPos); hit.hit) {
-				destroyBullet();
-				Explosion ex;
-				ex.position = hit.point;
-				ex.maxLifeTime = ex.remainingLifeTime = 0.75f + randomF32() * 0.25f;
-				ex.rotationOffset = randomF32();
-				explosions.push_back(ex);
-
-				Ember e;
-				e.position = hit.point;
-				for (u32 i = 0; i < 16; ++i) {
-					e.maxLifeTime = e.remainingLifeTime = 0.75f + randomF32() * 0.25f;
-					e.velocity = normalize(v2{randomF32(), randomF32()} + hit.normal) * (1.0f + randomF32());
-					e.rotationOffset = randomF32();
-					embers.push_back(e);
-				}
-				sounds.push_back({1, ex.position});
+			if (auto hit = raycastBullet(tiles, b.creator, b.position, nextPos); hit.hit) {
+				createExplosion(b.position, hit.normal);
+				destroyBullet(b);
+				--i;
 				continue;
 			}
 			b.position = nextPos;
@@ -1048,40 +932,24 @@ struct Game {
 			e.position += e.velocity * time.delta;
 		}
 	}
+	v2 getStartPosition() { return (v2)(v2i{randomI32() & 1, randomI32() & 1} * (CHUNK_W - 3) + 1); }
+	bool connectToServer(std::string const& ip, std::string* resultString) {
+		if (resultString) {
+			switch (joinServer(ip)) {
+				case JoinResult::badIp: *resultString = "Bad IP address"; return false;
+				case JoinResult::noConnection: *resultString = "Failed to connect to the server"; return false;
+				case JoinResult::error: *resultString = "An error occurred"; return false;
+				case JoinResult::ok: return true;
+			}
+		} else {
+			switch (joinServer(ip)) {
+				case JoinResult::ok: return true;
+				default: return false;
+			}
+		}
+		ASSERT(0);
+	}
 	void update(Renderer* renderer) {
-		notes[0].TargetVolume = input.keyHeld('Z');
-		notes[1].TargetVolume = input.keyHeld('S');
-		notes[2].TargetVolume = input.keyHeld('X');
-		notes[3].TargetVolume = input.keyHeld('D');
-		notes[4].TargetVolume = input.keyHeld('C');
-		notes[5].TargetVolume = input.keyHeld('V');
-		notes[6].TargetVolume = input.keyHeld('G');
-		notes[7].TargetVolume = input.keyHeld('B');
-		notes[8].TargetVolume = input.keyHeld('H');
-		notes[9].TargetVolume = input.keyHeld('N');
-		notes[10].TargetVolume = input.keyHeld('J');
-		notes[11].TargetVolume = input.keyHeld('M');
-		notes[12].TargetVolume = input.keyHeld('Q') || input.keyHeld(VK_OEM_COMMA);
-		notes[13].TargetVolume = input.keyHeld('2') || input.keyHeld('L');
-		notes[14].TargetVolume = input.keyHeld('W') || input.keyHeld(VK_DECIMAL);
-		notes[15].TargetVolume = input.keyHeld('3') || input.keyHeld(VK_OEM_1);
-		notes[16].TargetVolume = input.keyHeld('E') || input.keyHeld(VK_OEM_2);
-		notes[17].TargetVolume = input.keyHeld('R');
-		notes[18].TargetVolume = input.keyHeld('5');
-		notes[19].TargetVolume = input.keyHeld('T');
-		notes[20].TargetVolume = input.keyHeld('6');
-		notes[21].TargetVolume = input.keyHeld('Y');
-		notes[22].TargetVolume = input.keyHeld('7');
-		notes[23].TargetVolume = input.keyHeld('U');
-		notes[24].TargetVolume = input.keyHeld('I');
-		notes[25].TargetVolume = input.keyHeld('9');
-		notes[26].TargetVolume = input.keyHeld('O');
-		notes[27].TargetVolume = input.keyHeld('0');
-		notes[28].TargetVolume = input.keyHeld('P');
-		notes[29].TargetVolume = input.keyHeld(VK_OEM_4);
-		notes[30].TargetVolume = input.keyHeld(VK_OEM_PLUS);
-		notes[31].TargetVolume = input.keyHeld(VK_OEM_6);
-		notes[32].TargetVolume = input.keyHeld(VK_OEM_5);
 		switch (gameState) {
 			case Game::GameState::menu: {
 				std::vector<Label> labels;
@@ -1092,9 +960,16 @@ struct Game {
 				if (input.keyDown(VK_RETURN)) {
 					multiPlayer = false;
 					gameState = GameState::game;
+					spTiles = generateMap();
+					playerPosition = getStartPosition();
 				} else if (input.keyDown(' ')) {
-					multiPlayer = true;
 					gameState = GameState::enteringIp;
+				} else if (input.keyDown('L')) {
+					if (connectToServer("127.0.0.1", 0)) {
+						multiPlayer = true;
+						gameState = GameState::game;
+						playerPosition = getStartPosition();
+					}
 				}
 
 				RenderFrameInfo frame;
@@ -1105,10 +980,6 @@ struct Game {
 			case Game::GameState::enteringIp: {
 				static std::string inputIp;
 				static std::string joinString;
-				std::vector<Label> labels;
-				labels.push_back({(v2i)clientSize / 4 - v2i{0, 16}, joinString});
-				labels.push_back({(v2i)clientSize / 4, "Enter ip address or 'local'"});
-				labels.push_back({(v2i)clientSize / 4 + v2i{0, 16}, inputIp});
 
 				for (auto c : input.string()) {
 					if (c == '\b') {
@@ -1118,14 +989,18 @@ struct Game {
 						inputIp.push_back(c);
 				}
 
+				std::vector<Label> labels;
+				labels.push_back({(v2i)clientSize / 4, "Enter ip address or 'local'"});
+				labels.push_back({(v2i)clientSize / 4 + v2i{0, 16}, inputIp});
+				labels.push_back({(v2i)clientSize / 4 + v2i{0, 32}, joinString});
+
 				if (input.keyDown(VK_RETURN)) {
 					if (inputIp == "local")
 						inputIp = "127.0.0.1";
-					switch (joinServer(inputIp)) {
-						case JoinResult::badIp: joinString = "Bad IP address"; break;
-						case JoinResult::noConnection: joinString = "Failed to connect to the server"; break;
-						case JoinResult::ok: gameState = GameState::game; break;
-						case JoinResult::error: joinString = "An error occurred"; break;
+					if (connectToServer(inputIp, &joinString)) {
+						multiPlayer = true;
+						gameState = GameState::game;
+						playerPosition = getStartPosition();
 					}
 				} else if (input.keyDown(VK_ESCAPE)) {
 					gameState = GameState::menu;
@@ -1136,45 +1011,77 @@ struct Game {
 				renderFrame(renderer, std::move(frame));
 				break;
 			}
-			case Game::GameState::game: updateGame(renderer); break;
+			case Game::GameState::game: updateGame(multiPlayer ? mpTiles : spTiles, renderer); break;
 		}
 	}
-	void updateGame(Renderer* renderer) {
+	void createExplosion(v2 position, v2 normal) {
+		Explosion ex;
+		ex.position = position;
+		ex.maxLifeTime = ex.remainingLifeTime = 0.75f + randomF32() * 0.25f;
+		ex.rotationOffset = randomF32();
+		explosions.push_back(ex);
+
+		Ember e;
+		e.position = position;
+		for (u32 i = 0; i < 16; ++i) {
+			e.maxLifeTime = e.remainingLifeTime = 0.75f + randomF32() * 0.25f;
+			e.velocity = normalize(v2{randomF32(), randomF32()} + normal) * (1.0f + randomF32());
+			e.rotationOffset = randomF32();
+			embers.push_back(e);
+		}
+		sounds.push_back({1, ex.position});
+	}
+	void updateGame(Tiles const& tiles, Renderer* renderer) {
 		if (multiPlayer) {
 			for (;;) {
 				if (auto opt = network.pop()) {
 					try {
-						std::visit(Visitor{[&](Network::PositionChange pc) {
-											   enemies.at(pc.playerIndex).position = pc.position;
-										   },
-										   [&](Network::PlayerConnected pc) {
-											   printf("PlayerConnected: %u\n", pc.playerIndex);
-											   enemies[pc.playerIndex];
-										   },
-										   [&](Network::PlayerDisconnected pc) {
-											   printf("PlayerDisconnected: %u\n", pc.playerIndex);
-											   enemies.erase(pc.playerIndex);
-										   },
-										   [&](Network::AssignIndex ai) {
-											   printf("AssignIndex: %u\n", ai.newIndex);
-											   playerIndex = ai.newIndex;
-										   },
-										   [&](Network::CreateBullet b) {
-											   Bullet nb;
-											   nb.position = b.position;
-											   nb.direction = b.direction;
-											   nb.id = b.id;
-											   bullets.push_back(nb);
-										   },
-										   [&](Network::PlayerHit ph) {
-											   v2i newPos;
-											   do {
-												   newPos = {abs(randomI32()) % CHUNK_W, abs(randomI32()) % CHUNK_W};
-											   } while (tiles[newPos.x][newPos.y].exists);
-											   playerPosition = (v2)newPos;
-										   },
-										   [&](Network::GetTiles& gt) { tiles = gt.tiles; }, [](auto) {}},
-								   *opt);
+						std::visit(
+							Visitor{[&](Network::ChangeEnemyPosition pc) { enemies.at(pc.id).position = pc.position; },
+									[&](Network::ChangePosition pc) { playerPosition = pc.position; },
+									[&](Network::PlayerConnected pc) {
+										printf("PlayerConnected: %u\n", pc.id);
+										enemies[pc.id].health = pc.health;
+									},
+									[&](Network::PlayerDisconnected pc) {
+										printf("PlayerDisconnected: %u\n", pc.id);
+										enemies.erase(pc.id);
+									},
+									[&](Network::AssignId ai) {
+										printf("AssignId: %u\n", ai.id);
+										playerIndex = ai.id;
+									},
+									[&](Network::CreateBullet b) {
+										Bullet nb;
+										nb.creator = b.creator;
+										nb.id = b.id;
+										nb.position = b.position;
+										nb.direction = b.direction;
+										bullets.push_back(nb);
+									},
+									[&](Network::EnemyHit h) {
+										enemies.at(h.id).health = h.health;
+									},
+									[&](Network::EnemyKill k) {
+										enemies.at(k.id).health = 5;
+										++score;
+										fireDelta = 1.0f / (score * 0.01f + 1.0f);
+										sounds.push_back({2, playerPosition});
+									},
+									[&](Network::HealthChange h) {
+										playerHealth = h.health;
+										sounds.push_back({4, playerPosition});
+									},
+									[&](Network::ExplodeBullet eb) {
+										for (auto& b : bullets) {
+											if (b.id == eb.id && b.creator == eb.creator) {
+												createExplosion(b.position, eb.normal);
+												destroyBullet(b);
+											}
+										}
+									},
+									[&](Network::GetTiles& gt) { mpTiles = gt.tiles; }},
+							*opt);
 					} catch (...) {
 						puts("std::visit failed");
 					}
@@ -1213,7 +1120,7 @@ struct Game {
 			v2i tMax = min(roundInt(max(a, b) + (playerRadius + 0.5f)) + 1, V2i(CHUNK_W));
 			for (i32 tx = tMin.x; tx < tMax.x; ++tx) {
 				for (i32 ty = tMin.y; ty < tMax.y; ++ty) {
-					if (!tiles[tx][ty].exists)
+					if (!tiles.get(tx, ty))
 						continue;
 					v2 tilef = V2(tx, ty);
 
@@ -1290,11 +1197,11 @@ struct Game {
 		}
 		newHeroPosition += playerVelocity * time.delta;
 
-		playerPosition = newHeroPosition;
+		playerPosition = clamp(newHeroPosition, v2{}, V2(CHUNK_W));
 		if (multiPlayer)
-			network.push(Network::PositionChange{playerIndex, playerPosition});
+			network.push(Network::ChangePosition{playerPosition});
 
-		if (manhattan(playerPosition, V2(CHUNK_W / 2)) < midRadius) {
+		if (distanceSqr(playerPosition, V2(CHUNK_W / 2)) < midRadius * midRadius) {
 			timeInMid += time.delta;
 			static auto oldShots = shotsAtOnce;
 			shotsAtOnce = u32(timeInMid / 30) + 1;
@@ -1308,7 +1215,7 @@ struct Game {
 
 		updateExplosions();
 		updateEmbers();
-		updateBullets();
+		updateBullets(tiles);
 		if (fireTimer >= 0)
 			fireTimer -= time.delta;
 		if (input.mouseHeld(0)) {
@@ -1323,10 +1230,11 @@ struct Game {
 											(playerPosition - cameraPos) * pixelsInMeters * 2.0f);
 					b.direction = normalize(b.direction + cross(b.direction) * offset * 0.5f);
 					b.position = playerPosition;
-					b.id = Network::makeBulletID(playerIndex, bulletCounter++);
+					b.creator = playerIndex;
+					b.id = bulletCounter++;
 					bullets.push_back(b);
 					if (multiPlayer)
-						network.push(Network::CreateBullet{b.id, b.position, b.direction});
+						network.push(Network::CreateBullet{b.creator, b.id, b.position, b.direction});
 				};
 				if (shotsAtOnce == 1) {
 					createBullet(0);
@@ -1344,7 +1252,16 @@ struct Game {
 				sounds.push_back({0, playerPosition});
 			}
 		}
-		if (input.keyDown(VK_ESCAPE)) {
+		if (input.keyHeld(VK_ESCAPE)) {
+			leaveTimer -= time.delta;
+		} else {
+			leaveTimer = 1;
+		}
+		if (leaveTimer <= 0) {
+			if (multiPlayer) {
+				multiPlayer = false;
+				leaveServer();
+			}
 			gameState = GameState::menu;
 		}
 
@@ -1358,7 +1275,7 @@ struct Game {
 			for (i32 ty = 0; ty < CHUNK_W; ++ty) {
 				// if (!tiles[tx][ty].exists)
 				//	continue;
-				submitTile(1, m3::translation(tx, ty), V4(V3(tiles[tx][ty].exists ? 1 : 0.25f), 1.0f));
+				submitTile(1, m3::translation(tx, ty), V4(V3(tiles.get(tx, ty) ? 1 : 0.25f), 1.0f));
 			}
 		}
 		for (auto b : bullets) {
@@ -1376,13 +1293,17 @@ struct Game {
 			submitTile(3, m3::translation(e.position) * m3::rotationZ((t + e.rotationOffset) * 10),
 					   V4(V3(t * 2 + 2), t), 1 - pow2(1 - t));
 		}
-		submitTile(0, m3::translation(playerPosition));
-		submitLight(playerPosition, {1, 1, 1}, 15);
-		submitLight(V2(CHUNK_W/2-0.5f), v3{0.3, 0.9, 0.6} * 2, midRadius);
 
+		auto drawPlayer = [&](v2 position, u32 health) {
+			submitTile(0, m3::translation(position));
+			submitLight(position, V3(1), 15);
+			submitLight(position, V3(normalize(lerp(v2{1, 0}, v2{0, 1}, (health - 1) * 0.2f)) * 2, 0), 3);
+		};
+
+		submitLight(V2(CHUNK_W / 2 - 0.5f), v3{0.3, 0.6, 0.9} * 2, midRadius);
+		drawPlayer(playerPosition, playerHealth);
 		for (auto& [k, e] : enemies) {
-			submitTile(0, m3::translation(e.position));
-			submitLight(e.position, {1, .3, .3}, 15);
+			drawPlayer(e.position, e.health);
 		}
 
 		std::vector<Label> labels;

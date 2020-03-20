@@ -1,7 +1,6 @@
 @echo off
 
-set cFlags=
-set lFlags=
+set cFlags=/nologo /link
 
 set bindir=..\bin
 set srcdir=..\src\
@@ -12,23 +11,23 @@ pushd %bindir%
 set runtime=/MD
 
 if "%1" equ "r" (
-    set cFlags=/O2 /GL /D"BUILD_DEBUG=0"
-    set lFlags=/LTCG
+    set cFlags=/O2 /GL /D"BUILD_DEBUG=0" %cFlags% /LTCG
 ) else (
     set runtime=%runtime%d
-    set cFlags=/Od /D"BUILD_DEBUG=1"
+    set cFlags=/Od /D"BUILD_DEBUG=1" %cFlags%
 )
 
-set cFlags=%cFlags% /Z7 /FC /Oi /EHa /fp:fast /std:c++latest
-set lFlags=%lFlags% /incremental:no
+set arch=%VSCMD_ARG_TGT_ARCH%
+
 set deps=user32.lib d3d11.lib d3dcompiler.lib dxgi.lib winmm.lib opengl32.lib gdi32.lib shell32.lib
+set cFlags=%runtime% /Z7 /FC /Oi /EHa /fp:fast /std:c++latest %cFlags% /LIBPATH:"../dep/Microsoft DirectX SDK/Lib/%arch%/" %deps% /incremental:no
 
-set cFlags=%cFlags% /favor:INTEL64
+set cFlags=/arch:AVX2 /favor:INTEL64 %cFlags%
 
-cl %srcdir%main.cpp %runtime% %cFlags% /nologo /link %lFlags% /out:game.exe %deps%
+cl %srcdir%main.cpp %cFlags% /out:game.exe
 if %errorlevel% neq 0 goto fail
 
-cl %srcdir%server.cpp %runtime% %cFlags% /nologo /link %lFlags% /out:server.exe %deps%
+cl %srcdir%server.cpp %cFlags% /out:server.exe
 if %errorlevel% neq 0 goto fail
 
 echo [32mCompilation succeeded[0m

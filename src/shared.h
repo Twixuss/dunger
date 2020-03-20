@@ -44,7 +44,7 @@ struct Tiles {
 		return data[x] & (1 << y); 
 	}
 };
-inline static f32 const playerRadius = 0.35f;
+inline static f32 const playerRadius = 0.45f;
 inline static int const midRadius = 5;
 inline static Tiles generateMap() {
 	Tiles tiles;

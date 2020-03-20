@@ -22,7 +22,7 @@ set arch=%VSCMD_ARG_TGT_ARCH%
 set deps=user32.lib d3d11.lib d3dcompiler.lib dxgi.lib winmm.lib opengl32.lib gdi32.lib shell32.lib
 set cFlags=%runtime% /Z7 /FC /Oi /EHa /fp:fast /std:c++latest %cFlags% /LIBPATH:"../dep/Microsoft DirectX SDK/Lib/%arch%/" %deps% /incremental:no
 
-set cFlags=/arch:AVX2 /favor:INTEL64 %cFlags%
+set cFlags=/arch:AVX /favor:INTEL64 %cFlags%
 
 cl %srcdir%main.cpp %cFlags% /out:game.exe
 if %errorlevel% neq 0 goto fail

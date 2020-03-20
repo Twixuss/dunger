@@ -1,3 +1,4 @@
 bin/*
 tool/.vs/*
 *.lnk
+*.sln

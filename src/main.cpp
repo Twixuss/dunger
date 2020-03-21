@@ -1346,7 +1346,7 @@ struct Game {
 
 	bool botsEnabled;
 
-#define MAX_BLUR 100
+#define MAX_BLUR 50
 	int blurAmount = MAX_BLUR;
 
 	std::vector<std::vector<i16>> soundBuffers;

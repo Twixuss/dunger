@@ -177,11 +177,18 @@ Hit raycastCircle(v2 a, v2 b, v2 circle, f32 radius) {
 		if (distanceSqr(a, hit.point) > distanceSqr(a, b)) {
 			hit.hit = false;
 		} else {
-			hit.normal = normalize(circle - hit.point);
+			hit.normal = normalize(hit.point - circle);
 		}
 	}
 
 	return hit; // no intersections at all
+}
+v2 getRandomPosition(Tiles const& tiles) {
+	v2i newPos;
+	do {
+		newPos = {abs(randomI32()) % CHUNK_W, abs(randomI32()) % CHUNK_W};
+	} while (tiles.get(newPos.x, newPos.y));
+	return (v2)newPos;
 }
 
 namespace Network {
@@ -210,6 +217,7 @@ struct EnemyKill {
 	u32 id;
 };
 struct HealthChange {
+	u32 id;
 	u32 health;
 };
 struct CreateBullet {
@@ -226,7 +234,29 @@ struct ExplodeBullet {
 struct GetTiles {
 	Tiles tiles;
 };
-using ClientMessage = std::variant<ChangePosition, CreateBullet>;
+struct SpawnMob {
+	u32 id;
+	v2 position;
+	u32 health = 5;
+};
+struct DestroyMob {
+	u32 id;
+};
+struct MoveMob {
+	u32 id;
+	v2 position;
+};
+struct KillMob {
+	u32 id;
+};
+struct HitMob {
+	u32 id;
+	u32 health;
+};
+struct ToggleBots {
+	bool enabled;
+};
+using ClientMessage = std::variant<ChangePosition, CreateBullet, ToggleBots>;
 using ServerMessage =
-	std::variant<AssignId, ChangePosition, ChangeEnemyPosition, CreateBullet, ExplodeBullet, EnemyHit, EnemyKill, HealthChange, GetTiles, PlayerConnected, PlayerDisconnected>;
+	std::variant<AssignId, ChangePosition, ChangeEnemyPosition, CreateBullet, ExplodeBullet, EnemyHit, EnemyKill, ToggleBots, SpawnMob, DestroyMob, MoveMob, KillMob, HitMob, HealthChange, GetTiles, PlayerConnected, PlayerDisconnected>;
 } // namespace Network

@@ -240,19 +240,15 @@ int main(int argc, char** argv) {
 						}
 						if (hit = raycastCircle(a, b, target.position, playerRadius); hit.hit) {
 							send(getPlayerFromID(firingPlayerId).socket, EnemyHit{target.id, target.health});
-							if(--target.health == 0) {
+							if (--target.health == 0) {
 								target.health = 5;
-								v2i newPos;
-								do {
-									newPos = {abs(randomI32()) % CHUNK_W, abs(randomI32()) % CHUNK_W};
-								} while (tiles.get(newPos.x, newPos.y));
-								v2 newPosf = (v2)newPos;
-								send(target.socket, ChangePosition{newPosf});
-								target.position = newPosf;
+								v2 newPos = getRandomPosition(tiles);
+								send(target.socket, ChangePosition{newPos});
+								target.position = newPos;
 								target.invulnerableTime = 1;
 								for (auto& p : players) {
 									if (p.id != target.id) {
-										send(p.socket, ChangeEnemyPosition{p.id, newPosf});
+										send(p.socket, ChangeEnemyPosition{p.id, newPos});
 									}
 								}
 								send(getPlayerFromID(firingPlayerId).socket, EnemyKill{target.id});
@@ -302,16 +298,19 @@ int main(int argc, char** argv) {
 				++time.frameCount;
 
 				for (auto& [s, v] : messages) {
+					if (v.size() == 0)
+						continue;
 					for (;;) {
-						int result = ::send(s, (char*)v.data(), v.size() * sizeof(ServerMessage), 0);
-						if (result == -1) {
-							if (WSAGetLastError() == WSAENOTSOCK) {
-								pushDisconnectedPlayer(s);
-								break;
-							}
-						} else {
+						int result = ::send(s, (char*)v.data(), v.size() * sizeof(v[0]), 0);
+						if (result > 0)
+							break;
+						int error = WSAGetLastError();
+						if (error == WSAENOTSOCK) {
+							pushDisconnectedPlayer(s);
 							break;
 						}
+						printf("send failed: %i\n", error);
+						ASSERT(0);
 					}
 				}
 				messages.clear();

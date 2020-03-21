@@ -112,7 +112,9 @@ HWND createWindow(HINSTANCE instance) {
 	wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT {
 		switch (msg) {
 			case WM_CHAR: {
-				input.chars.push_back((char)wp);
+				char c = (char)wp;
+				if (c != VK_ESCAPE)
+					input.chars.push_back(c);
 				return 0;
 			}
 			case WM_DESTROY: {
